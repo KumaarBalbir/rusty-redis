@@ -1,7 +1,7 @@
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    str,
+    str, thread,
 };
 
 fn handle_connection(mut tcp_stream: TcpStream) {
@@ -45,11 +45,16 @@ fn main() {
     // and it will panic and exit if the binding fails.
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
+    // this for loop is for accepting incoming connections
     for stream in listener.incoming() {
         match stream {
             Ok(tcp_stream) => {
                 println!("accepted new connection");
-                handle_connection(tcp_stream);
+
+                // Spawn a new thread for each incoming connection
+                thread::spawn(move || {
+                    handle_connection(tcp_stream);
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
