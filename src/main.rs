@@ -52,6 +52,7 @@ fn main() {
                 println!("accepted new connection");
 
                 // Spawn a new thread for each incoming connection
+                // The move keyword is used to transfer ownership of the TcpStream to the spawned thread.
                 thread::spawn(move || {
                     handle_connection(tcp_stream);
                 });
