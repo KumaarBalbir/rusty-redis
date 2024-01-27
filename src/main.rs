@@ -23,7 +23,7 @@ impl Command {
     fn generate_response(&self) -> String {
         match &self.name {
             CommandName::Ping => "+PONG\r\n".to_string(),
-            CommandName::Echo => format!("+{}\r\n", self.args.join(" ")),
+            CommandName::Echo => format!("+{}\r\n", self.args[0]),
         }
     }
 }
