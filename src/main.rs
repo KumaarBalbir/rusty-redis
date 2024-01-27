@@ -40,7 +40,6 @@ fn parse_request(request: &str) -> Command {
         }
     } else if parts[2] == "ECHO" || parts[2] == "echo" {
         // Check if it's an ECHO command
-        let _length: usize = parts[3].parse().unwrap();
         let message = parts[4];
         Command {
             name: CommandName::Echo,
