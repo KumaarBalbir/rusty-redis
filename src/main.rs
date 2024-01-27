@@ -4,6 +4,49 @@ use std::{
     str, thread,
 };
 
+// Enum to represent command names
+#[derive(Debug)]
+enum CommandName {
+    Ping,
+    Echo,
+}
+
+// Struct to represent a command
+#[derive(Debug)]
+struct Command {
+    name: CommandName,
+    args: Vec<String>,
+}
+
+impl Command {
+    // Function to generate a response based on the command
+    fn generate_response(&self) -> String {
+        match &self.name {
+            CommandName::Ping => "+PONG\r\n".to_string(),
+            CommandName::Echo => format!("+{}\r\n", self.args.join(" ")),
+        }
+    }
+}
+
+// Function to parse the request and return a Command
+fn parse_request(request: &str) -> Command {
+    let parts: Vec<&str> = request.trim().split_whitespace().collect();
+
+    let cmd_name = match parts.get(2) {
+        Some(&"PING") => CommandName::Ping,
+        Some(&"ECHO") => CommandName::Echo,
+        _ => panic!("Unknown command"),
+    };
+
+    let args = parts[3..].into_iter().map(|s| s.to_string()).collect();
+
+    Command {
+        name: cmd_name,
+        args,
+    }
+}
+
+// Function to handle incoming connections
 fn handle_connection(mut tcp_stream: TcpStream) {
     // Create a loop to continuously process incoming data on the same connection
     loop {
@@ -20,13 +63,24 @@ fn handle_connection(mut tcp_stream: TcpStream) {
                 println!("read {} bytes", num_bytes);
                 println!("data: {:?}", str::from_utf8(&buffer[..num_bytes]));
 
+                // parse the request
+                let request = str::from_utf8(&buffer[..num_bytes]).unwrap();
+                let command = parse_request(request);
+
+                // Generate a response based on the command
+                let response = command.generate_response();
+
+                // Respond to the client
+                let _res_write = tcp_stream.write(response.as_bytes());
+
                 // Check if the received data matches the encoded PING command,
                 // and respond with the hardcoded +PONG\r\n message using write method.
-                if buffer[..num_bytes] == b"*1\r\n$4\r\nPING\r\n"[..num_bytes]
-                    || buffer[..num_bytes] == b"*1\r\n$4\r\nping\r\n"[..num_bytes]
-                {
-                    let _res_write = tcp_stream.write(b"+PONG\r\n");
-                }
+
+                // if buffer[..num_bytes] == b"*1\r\n$4\r\nPING\r\n"[..num_bytes]
+                //     || buffer[..num_bytes] == b"*1\r\n$4\r\nping\r\n"[..num_bytes]
+                // {
+                //     let _res_write = tcp_stream.write(b"+PONG\r\n");
+                // }
             }
             Err(e) => {
                 println!("error: {}", e);
