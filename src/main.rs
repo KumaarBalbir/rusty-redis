@@ -32,17 +32,26 @@ impl Command {
 fn parse_request(request: &str) -> Command {
     let parts: Vec<&str> = request.trim().split_whitespace().collect();
 
-    let cmd_name = match parts.get(2) {
-        Some(&"PING") => CommandName::Ping,
-        Some(&"ECHO") => CommandName::Echo,
-        _ => panic!("Unknown command"),
-    };
-
-    let args = parts[3..].into_iter().map(|s| s.to_string()).collect();
-
-    Command {
-        name: cmd_name,
-        args,
+    // Check if it's a PING command
+    if parts.len() == 1 && (parts[0] == "PING" || parts[0] == "ping") {
+        Command {
+            name: CommandName::Ping,
+            args: Vec::new(),
+        }
+    } else if parts.len() >= 5 && parts[0] == "*" && parts[2] == "$" {
+        // Check if it's an ECHO command
+        let length: usize = parts[3].parse().unwrap();
+        let message = parts[4];
+        if length + 5 == parts.len() && message.len() == length {
+            Command {
+                name: CommandName::Echo,
+                args: vec![message.to_string()],
+            }
+        } else {
+            panic!("Invalid ECHO command format");
+        }
+    } else {
+        panic!("Unknown command format");
     }
 }
 
