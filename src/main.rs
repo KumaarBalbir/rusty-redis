@@ -79,16 +79,11 @@ fn parse_request(request: &str) -> Command {
                     args: Vec::new(),
                 }
             } else if s == "ECHO" {
+                let message = parts[4];
                 Command {
                     name: CommandName::Echo,
-                    args: parts[3..].into_iter().map(|s| s.to_string()).collect(),
+                    args: vec![message.to_string()],
                 }
-
-                // let message = parts[4];
-                // Command {
-                //     name: CommandName::Echo,
-                //     args: vec![message.to_string()],
-                // }
             } else if s == "SET" {
                 Command {
                     name: CommandName::Set,
