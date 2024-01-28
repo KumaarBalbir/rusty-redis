@@ -28,15 +28,17 @@ impl Command {
             CommandName::Ping => "+PONG\r\n".to_string(),
             CommandName::Echo => format!("+{}\r\n", self.args[0]),
             CommandName::Set => {
-                if self.args.len() == 2 {
-                    db.set(&self.args[0], &self.args[1]);
+                // for command - "*3\r\n$3\r\nset\r\n$7\r\noranges\r\n$5\r\nworld\r\n", args will have - "$7", "oranges", "$5", "world"
+                if self.args.len() == 4 {
+                    db.set(&self.args[1], &self.args[3]);
                     "+OK\r\n".to_string()
                 } else {
                     "-ERR wrong number of arguments for 'SET' command\r\n".to_string()
                 }
             }
             CommandName::Get => {
-                if let Some(value) = db.get(&self.args[0]) {
+                // for command - "*3\r\n$3\r\nget\r\n$7\r\noranges\r\n", args will have - "$7", "oranges"
+                if let Some(value) = db.get(&self.args[1]) {
                     format!("+{}\r\n", value)
                 } else {
                     "$-1\r\n".to_string() // Null bulk reply for non-existing key
