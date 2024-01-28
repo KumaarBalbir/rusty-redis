@@ -1,5 +1,8 @@
+mod store;
 use std::io::Error;
+use store::Database;
 
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -9,6 +12,8 @@ use tokio::{
 enum Command {
     Ping,
     Echo(String),
+    Set(String, String),
+    Get(String),
 }
 
 struct RESPDataType {}
@@ -27,6 +32,34 @@ async fn parse_length(input: &[u8], len: &mut usize) -> usize {
         pos += 1;
     }
     pos + 2
+}
+
+async fn parse_bulk_string(input: &[u8], result: &mut String) -> usize {
+    if input[0] != RESPDataType::BULK_STRING {
+        return 0;
+    }
+    let mut pos: usize = 1;
+    let mut string_lemgth = 0;
+    pos += parse_length(&input[pos..], &mut string_lemgth).await;
+    *result = String::from_utf8_lossy(&input[pos..pos + string_lemgth]).to_string();
+    pos + string_lemgth + 2
+}
+async fn parse_echo_arg(input: &[u8]) -> Result<String, Error> {
+    let mut echo = String::new();
+    let _ = parse_bulk_string(input, &mut echo).await;
+    Ok(echo)
+}
+async fn parse_set_arg(input: &[u8]) -> Result<(String, String), Error> {
+    let mut key = String::new();
+    let pos = parse_bulk_string(input, &mut key).await;
+    let mut value = String::new();
+    let _ = parse_bulk_string(&input[pos..], &mut value).await;
+    Ok((key, value))
+}
+async fn parse_get_arg(input: &[u8]) -> Result<String, Error> {
+    let mut result = String::new();
+    let _ = parse_bulk_string(input, &mut result).await;
+    Ok(result)
 }
 async fn parse_command(input: &[u8]) -> Result<Command, Error> {
     if input[0] != RESPDataType::ARRAY {
@@ -47,21 +80,38 @@ async fn parse_command(input: &[u8]) -> Result<Command, Error> {
     return match command.as_str() {
         "PING" => Ok(Command::Ping),
         "ECHO" => {
-            let mut pos = pos + string_lemgth + 2;
-            let mut string_lemgth = 0;
-            if input[pos] != RESPDataType::BULK_STRING {
+            if args_count != 2 {
                 return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
             }
-            pos += 1;
-            pos += parse_length(&input[pos..], &mut string_lemgth).await;
-            let echo_arg = String::from_utf8_lossy(&input[pos..pos + string_lemgth]).to_string();
+            pos = pos + string_lemgth + 2;
+            let echo_arg = parse_echo_arg(&input[pos..]).await?;
             Ok(Command::Echo(echo_arg))
+        }
+        "SET" => {
+            if args_count != 3 {
+                return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
+            }
+            pos = pos + string_lemgth + 2;
+            let (key, value) = parse_set_arg(&input[pos..]).await?;
+            Ok(Command::Set(key, value))
+        }
+        "GET" => {
+            if args_count != 2 {
+                return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
+            }
+            pos = pos + string_lemgth + 2;
+            let key = parse_get_arg(&input[pos..]).await?;
+            Ok(Command::Get(key))
         }
         _ => Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data")),
     };
 }
 
-async fn execute_command(stream: &mut TcpStream, command: Command) -> Result<(), Error> {
+async fn execute_command(
+    stream: &mut TcpStream,
+    command: Command,
+    db: &Database,
+) -> Result<(), Error> {
     let resp: String;
     match command {
         Command::Ping => {
@@ -70,12 +120,24 @@ async fn execute_command(stream: &mut TcpStream, command: Command) -> Result<(),
         Command::Echo(echo_arg) => {
             resp = format!("+{}\r\n", echo_arg);
         }
+        Command::Set(key, value) => {
+            db.set(&key, &value).await;
+            resp = "+OK\r\n".to_string();
+        }
+        Command::Get(key) => match db.get(&key).await {
+            Some(value) => {
+                resp = format!("+{}\r\n", value);
+            }
+            None => {
+                resp = "$-1\r\n".to_string();
+            }
+        },
     }
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
 }
 
-async fn handle_stream(stream: TcpStream) -> Result<(), Error> {
+async fn handle_stream(stream: TcpStream, db: &Database) -> Result<(), Error> {
     let mut stream = stream;
     let mut buf = [0; 1024];
     while let Ok(n) = stream.read(&mut buf).await {
@@ -83,7 +145,7 @@ async fn handle_stream(stream: TcpStream) -> Result<(), Error> {
             break;
         }
         match parse_command(&buf[..n]).await {
-            Ok(cmd) => execute_command(&mut stream, cmd).await?,
+            Ok(cmd) => execute_command(&mut stream, cmd, db).await?,
             Err(e) => {
                 println!("error: {}", e);
                 break;
@@ -97,6 +159,7 @@ async fn handle_stream(stream: TcpStream) -> Result<(), Error> {
 async fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
+    let db = Arc::new(Database::new());
 
     // The below line creates a TCP listener bound to the address "127.0.0.1" (localhost) and port 6379.
     // The unwrap() method is used to handle the Result returned by bind,
@@ -110,8 +173,9 @@ async fn main() {
         match stream {
             Ok((_stream, _addr)) => {
                 println!("accepted new connection");
+                let db = Arc::clone(&db);
                 spawn(async move {
-                    if let Err(e) = handle_stream(_stream).await {
+                    if let Err(e) = handle_stream(_stream, &db).await {
                         println!("error: {}", e);
                     }
                 });
@@ -120,5 +184,26 @@ async fn main() {
                 println!("error: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[tokio::test]
+    async fn test_parse_length() {
+        let input = b"123\r\n";
+        let mut len = 0;
+        let pos = parse_length(input, &mut len).await;
+        assert_eq!(pos, 5);
+        assert_eq!(len, 123);
+    }
+    #[tokio::test]
+    async fn test_parse_bulk_string() {
+        let input = b"$6\r\nfoobar\r\n";
+        let mut result = String::new();
+        let pos = parse_bulk_string(input, &mut result).await;
+        assert_eq!(pos, 12);
+        assert_eq!(result, "foobar");
     }
 }
