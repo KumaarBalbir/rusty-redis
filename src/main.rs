@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     str, thread,
@@ -9,6 +10,8 @@ use std::{
 enum CommandName {
     Ping,
     Echo,
+    Set,
+    Get,
 }
 
 // Struct to represent a command
@@ -20,11 +23,46 @@ struct Command {
 
 impl Command {
     // Function to generate a response based on the command
-    fn generate_response(&self) -> String {
+    fn generate_response(&self, db: &mut Database) -> String {
         match &self.name {
             CommandName::Ping => "+PONG\r\n".to_string(),
             CommandName::Echo => format!("+{}\r\n", self.args[0]),
+            CommandName::Set => {
+                if self.args.len() == 2 {
+                    db.set(&self.args[0], &self.args[1]);
+                    "+OK\r\n".to_string()
+                } else {
+                    "-ERR wrong number of arguments for 'SET' command\r\n".to_string()
+                }
+            }
+            CommandName::Get => {
+                if let Some(value) = db.get(&self.args[0]) {
+                    format!("+{}\r\n", value)
+                } else {
+                    "$-1\r\n".to_string() // Null bulk reply for non-existing key
+                }
+            }
         }
+    }
+}
+
+// Database struct to store key-value pairs
+#[derive(Clone)]
+struct Database {
+    db: HashMap<String, String>,
+}
+
+impl Database {
+    fn new() -> Database {
+        Database { db: HashMap::new() }
+    }
+
+    fn get(&self, key: &str) -> Option<&String> {
+        self.db.get(key)
+    }
+
+    fn set(&mut self, key: &str, value: &str) {
+        self.db.insert(key.to_owned(), value.to_owned());
     }
 }
 
@@ -32,26 +70,45 @@ impl Command {
 fn parse_request(request: &str) -> Command {
     let parts: Vec<&str> = request.trim().split_whitespace().collect();
 
-    // Check if it's a PING command
-    if parts[2] == "PING" || parts[2] == "ping" {
-        Command {
-            name: CommandName::Ping,
-            args: Vec::new(),
+    // Check if it's a PING, ECHO, SET, or GET command
+    match parts.get(2).map(|&s| s.to_uppercase()) {
+        Some(s) => {
+            if s == "PING" {
+                Command {
+                    name: CommandName::Ping,
+                    args: Vec::new(),
+                }
+            } else if s == "ECHO" {
+                Command {
+                    name: CommandName::Echo,
+                    args: parts[3..].into_iter().map(|s| s.to_string()).collect(),
+                }
+
+                // let message = parts[4];
+                // Command {
+                //     name: CommandName::Echo,
+                //     args: vec![message.to_string()],
+                // }
+            } else if s == "SET" {
+                Command {
+                    name: CommandName::Set,
+                    args: parts[3..].into_iter().map(|s| s.to_string()).collect(),
+                }
+            } else if s == "GET" {
+                Command {
+                    name: CommandName::Get,
+                    args: parts[3..].into_iter().map(|s| s.to_string()).collect(),
+                }
+            } else {
+                panic!("Unknown command format");
+            }
         }
-    } else if parts[2] == "ECHO" || parts[2] == "echo" {
-        // Check if it's an ECHO command
-        let message = parts[4];
-        Command {
-            name: CommandName::Echo,
-            args: vec![message.to_string()],
-        }
-    } else {
-        panic!("Unknown command format");
+        None => panic!("Invalid command format"),
     }
 }
 
 // Function to handle incoming connections
-fn handle_connection(mut tcp_stream: TcpStream) {
+fn handle_connection(mut tcp_stream: TcpStream, db: &mut Database) {
     // Create a loop to continuously process incoming data on the same connection
     loop {
         let mut buffer: [u8; 1024] = [0; 1024];
@@ -72,7 +129,7 @@ fn handle_connection(mut tcp_stream: TcpStream) {
                 let command = parse_request(request);
 
                 // Generate a response based on the command
-                let response = command.generate_response();
+                let response = command.generate_response(db);
 
                 // Respond to the client
                 let _res_write = tcp_stream.write(response.as_bytes());
@@ -103,16 +160,22 @@ fn main() {
     // and it will panic and exit if the binding fails.
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
+    // Create a new Database instance
+    let db = Database::new();
+
     // this for loop is for accepting incoming connections
     for stream in listener.incoming() {
         match stream {
             Ok(tcp_stream) => {
                 println!("accepted new connection");
 
+                // Clone the db value before passing it to the closure
+                let mut cloned_db = db.clone();
+
                 // Spawn a new thread for each incoming connection
                 // The move keyword is used to transfer ownership of the TcpStream to the spawned thread.
                 thread::spawn(move || {
-                    handle_connection(tcp_stream);
+                    handle_connection(tcp_stream, &mut cloned_db);
                 });
             }
             Err(e) => {
