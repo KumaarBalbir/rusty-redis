@@ -33,7 +33,7 @@ impl Command {
                     db.set(&self.args[1], &self.args[3]);
                     "+OK\r\n".to_string()
                 } else {
-                    "-ERR wrong number of arguments for 'SET' command\r\n".to_string()
+                    "-ERR wrong number of argument for 'SET' command\r\n".to_string()
                 }
             }
             CommandName::Get => {
