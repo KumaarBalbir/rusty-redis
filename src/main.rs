@@ -12,7 +12,7 @@ use tokio::{
 enum Command {
     Ping,
     Echo(String),
-    Set(String, String),
+    Set(String, String, Option<u64>),
     Get(String),
 }
 
@@ -34,27 +34,46 @@ async fn parse_length(input: &[u8], len: &mut usize) -> usize {
     pos + 2
 }
 
-async fn parse_bulk_string(input: &[u8], result: &mut String) -> usize {
+async fn parse_bulk_string(input: &[u8], result: &mut String) -> Result<usize, Error> {
     if input[0] != RESPDataType::BULK_STRING {
-        return 0;
+        return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
     }
     let mut pos: usize = 1;
-    let mut string_lemgth = 0;
-    pos += parse_length(&input[pos..], &mut string_lemgth).await;
-    *result = String::from_utf8_lossy(&input[pos..pos + string_lemgth]).to_string();
-    pos + string_lemgth + 2
+    let mut string_length = 0;
+    pos += parse_length(&input[pos..], &mut string_length).await;
+    *result = String::from_utf8_lossy(&input[pos..pos + string_length]).to_string();
+    Ok(pos + string_length + 2)
 }
 async fn parse_echo_arg(input: &[u8]) -> Result<String, Error> {
     let mut echo = String::new();
     let _ = parse_bulk_string(input, &mut echo).await;
     Ok(echo)
 }
-async fn parse_set_arg(input: &[u8]) -> Result<(String, String), Error> {
+async fn parse_set_arg(
+    input: &[u8],
+    arg_count: usize,
+) -> Result<(String, String, Option<u64>), Error> {
     let mut key = String::new();
-    let pos = parse_bulk_string(input, &mut key).await;
+    let mut pos = parse_bulk_string(input, &mut key).await?;
+    if input[pos] != RESPDataType::BULK_STRING {
+        return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
+    }
     let mut value = String::new();
-    let _ = parse_bulk_string(&input[pos..], &mut value).await;
-    Ok((key, value))
+    pos += parse_bulk_string(&input[pos..], &mut value).await?;
+
+    if arg_count == 2 {
+        return Ok((key, value, None));
+    }
+
+    let mut arg = String::new();
+    pos += parse_bulk_string(&input[pos..], &mut arg).await?;
+    if arg.to_lowercase() != "px" {
+        return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
+    }
+    let mut expiry_in_ms = String::new();
+    _ = parse_bulk_string(&input[pos..], &mut expiry_in_ms).await?;
+
+    Ok((key, value, Some(expiry_in_ms.parse::<u64>().unwrap())))
 }
 async fn parse_get_arg(input: &[u8]) -> Result<String, Error> {
     let mut result = String::new();
@@ -73,33 +92,33 @@ async fn parse_command(input: &[u8]) -> Result<Command, Error> {
         return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
     }
     pos += 1;
-    let mut string_lemgth = 0;
-    pos += parse_length(&input[pos..], &mut string_lemgth).await;
-    println!("string_lemgth: {}", string_lemgth);
-    let command = String::from_utf8_lossy(&input[pos..pos + string_lemgth]).to_ascii_uppercase();
+    let mut string_length = 0;
+    pos += parse_length(&input[pos..], &mut string_length).await;
+    println!("string_length: {}", string_length);
+    let command = String::from_utf8_lossy(&input[pos..pos + string_length]).to_ascii_uppercase();
     return match command.as_str() {
         "PING" => Ok(Command::Ping),
         "ECHO" => {
             if args_count != 2 {
                 return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
             }
-            pos = pos + string_lemgth + 2;
+            pos = pos + string_length + 2;
             let echo_arg = parse_echo_arg(&input[pos..]).await?;
             Ok(Command::Echo(echo_arg))
         }
         "SET" => {
-            if args_count != 3 {
+            if args_count < 3 {
                 return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
             }
-            pos = pos + string_lemgth + 2;
-            let (key, value) = parse_set_arg(&input[pos..]).await?;
-            Ok(Command::Set(key, value))
+            pos = pos + string_length + 2;
+            let (key, value, expiry_in_ms) = parse_set_arg(&input[pos..], args_count - 1).await?;
+            Ok(Command::Set(key, value, expiry_in_ms))
         }
         "GET" => {
             if args_count != 2 {
                 return Err(Error::new(std::io::ErrorKind::InvalidData, "invalid data"));
             }
-            pos = pos + string_lemgth + 2;
+            pos = pos + string_length + 2;
             let key = parse_get_arg(&input[pos..]).await?;
             Ok(Command::Get(key))
         }
@@ -112,27 +131,29 @@ async fn execute_command(
     command: Command,
     db: &Database,
 ) -> Result<(), Error> {
-    let resp: String;
-    match command {
-        Command::Ping => {
-            resp = "+PONG\r\n".to_string();
-        }
+    let resp: String = match command {
+        Command::Ping => "+PONG\r\n".to_string(),
+
         Command::Echo(echo_arg) => {
-            resp = format!("+{}\r\n", echo_arg);
+            format!("+{}\r\n", echo_arg)
         }
-        Command::Set(key, value) => {
-            db.set(&key, &value).await;
-            resp = "+OK\r\n".to_string();
-        }
-        Command::Get(key) => match db.get(&key).await {
-            Some(value) => {
-                resp = format!("+{}\r\n", value);
+        Command::Set(key, value, expiry_in_ms) => match expiry_in_ms {
+            Some(expiry_in_ms) => {
+                db.set_with_expire(&key, &value, expiry_in_ms).await;
+                "+OK\r\n".to_string()
             }
             None => {
-                resp = "$-1\r\n".to_string();
+                db.set(&key, &value).await;
+                "+OK\r\n".to_string()
             }
         },
-    }
+        Command::Get(key) => match db.get(&key).await {
+            Some(value) => {
+                format!("+{}\r\n", value)
+            }
+            None => "$-1\r\n".to_string(),
+        },
+    };
     stream.write_all(resp.as_bytes()).await?;
     Ok(())
 }
@@ -202,7 +223,7 @@ mod test {
     async fn test_parse_bulk_string() {
         let input = b"$6\r\nfoobar\r\n";
         let mut result = String::new();
-        let pos = parse_bulk_string(input, &mut result).await;
+        let pos = parse_bulk_string(input, &mut result).await.unwrap();
         assert_eq!(pos, 12);
         assert_eq!(result, "foobar");
     }
