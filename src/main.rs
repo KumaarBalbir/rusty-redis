@@ -1,4 +1,3 @@
-mod config;
 mod parse;
 mod store;
 use std::io::Error;
@@ -18,6 +17,7 @@ pub enum Command {
     Set(String, String, Option<u64>),
     Get(String),
     ConfigGet(String),
+    Keys(String),
     Unknown,
 }
 
@@ -25,7 +25,6 @@ async fn execute_command(
     stream: &mut TcpStream,
     command: Command,
     db: &Database,
-    config: &config::Config,
 ) -> Result<(), Error> {
     let resp: String = match command {
         Command::Ping => "+PONG\r\n".to_string(),
@@ -49,7 +48,17 @@ async fn execute_command(
             }
             None => "$-1\r\n".to_string(),
         },
-        Command::ConfigGet(key) => match config.get(key.as_str()) {
+        Command::Keys(pattern) => {
+            let mut keys = db.keys(&pattern).await;
+            keys.sort();
+            let mut resp = String::new();
+            resp.push_str(&format!("*{}\r\n", keys.len()));
+            for key in keys {
+                resp.push_str(&format!("${}\r\n{}\r\n", key.len(), key));
+            }
+            resp
+        }
+        Command::ConfigGet(key) => match db.config_get(key.as_str()).await {
             Some(value) => {
                 format!(
                     "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
@@ -67,11 +76,7 @@ async fn execute_command(
     Ok(())
 }
 
-async fn handle_stream(
-    stream: TcpStream,
-    db: &Database,
-    config: &config::Config,
-) -> Result<(), Error> {
+async fn handle_stream(stream: TcpStream, db: &Database) -> Result<(), Error> {
     let mut stream = stream;
     let mut buf = [0; 1024];
     while let Ok(n) = stream.read(&mut buf).await {
@@ -79,7 +84,7 @@ async fn handle_stream(
             break;
         }
         match parse_command(&buf[..n]).await {
-            Ok(cmd) => execute_command(&mut stream, cmd, db, config).await?,
+            Ok(cmd) => execute_command(&mut stream, cmd, db).await?,
             Err(e) => {
                 println!("error: {}", e);
                 break;
@@ -93,12 +98,9 @@ async fn handle_stream(
 async fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
-    let mut config = config::Config::new();
-    config.from_args();
-    println!("config: {:?}", config);
 
-    let config = Arc::new(config);
-    let db = Arc::new(Database::new());
+    let db = Database::new();
+    let db = Arc::new(db);
 
     // The below line creates a TCP listener bound to the address "127.0.0.1" (localhost) and port 6379.
     // The unwrap() method is used to handle the Result returned by bind,
@@ -112,10 +114,9 @@ async fn main() {
         match stream {
             Ok((_stream, _addr)) => {
                 println!("accepted new connection");
-                let config = Arc::clone(&config);
                 let db = Arc::clone(&db);
                 spawn(async move {
-                    if let Err(e) = handle_stream(_stream, &db, &config).await {
+                    if let Err(e) = handle_stream(_stream, &db).await {
                         println!("error: {}", e);
                     }
                 });
