@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env::args;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use std::fs::File;
@@ -15,7 +15,7 @@ pub struct Config {
 #[derive(Clone)]
 struct ExpiringValue {
     value: String,
-    expires_at: Option<Instant>,
+    expires_at: Option<SystemTime>,
 }
 pub struct Database {
     config: Config,
@@ -86,7 +86,7 @@ impl Database {
         db.insert(key.to_owned(), value);
     }
     pub async fn set_with_expire(&self, key: &str, value: &str, expiry_in_ms: u64) {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let duration = Duration::from_millis(expiry_in_ms);
         let value = ExpiringValue {
             value: value.to_owned(),
@@ -96,7 +96,7 @@ impl Database {
         db.insert(key.to_owned(), value);
     }
     pub async fn get(&self, key: &str) -> Option<String> {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let value = {
             let db = self.db.read().await;
             db.get(key).cloned()
@@ -116,12 +116,29 @@ impl Database {
     }
 
     pub async fn keys(&self, pattern: &str) -> Vec<String> {
-        let db = self.db.read().await;
-        let keys: Vec<String> = db.keys().cloned().collect();
-        if pattern == "*" {
-            return keys;
+        let now = SystemTime::now();
+        let mut expired_keys = Vec::new();
+        let mut valid_keys = Vec::new();
+        {
+            let db = self.db.read().await;
+            for (key, value) in db.iter() {
+                match value.expires_at {
+                    Some(expires_at) if expires_at < now => {
+                        expired_keys.push(key.to_owned());
+                    }
+                    _ => {
+                        valid_keys.push(key.to_owned());
+                    }
+                }
+            }
         }
-        Vec::new()
+        {
+            let mut db = self.db.write().await;
+            for key in expired_keys {
+                db.remove(&key);
+            }
+        }
+        valid_keys
     }
 
     pub async fn config_get(&self, key: &str) -> Option<String> {
@@ -142,11 +159,14 @@ fn length_encode(buf: &[u8]) -> Option<(usize, usize)> {
     Some(num)
 }
 fn serialize_kv(buf: &[u8]) -> Option<(String, ExpiringValue, usize)> {
-    let mut pos = 0;
-    if buf[pos] != 0 {
-        return None;
-    }
-    pos += 1;
+    let is_expired = buf[0] == 0xfc;
+    let expires_at = if is_expired {
+        let expires_at = u64::from_le_bytes(buf[1..9].try_into().unwrap());
+        Some(UNIX_EPOCH + Duration::from_millis(expires_at as u64))
+    } else {
+        None
+    };
+    let mut pos = if is_expired { 10 } else { 1 };
     let (key_len, offset) = length_encode(&buf[pos..]).unwrap();
     pos += offset;
     let key = String::from_utf8(buf[pos..pos + key_len].to_vec()).unwrap();
@@ -156,11 +176,13 @@ fn serialize_kv(buf: &[u8]) -> Option<(String, ExpiringValue, usize)> {
     let value = String::from_utf8(buf[pos..pos + value_len].to_vec()).unwrap();
     let value = ExpiringValue {
         value,
-        expires_at: None,
+        expires_at: expires_at,
     };
     Some((key, value, pos + value_len))
 }
 fn serialize(file: File) -> HashMap<String, ExpiringValue> {
+    let now = SystemTime::now();
+    println!("now: {:?}", now);
     let mut reader = BufReader::new(file);
     let mut buf = [0u8; 1024];
     let bytes_read = reader.read(&mut buf).unwrap();
@@ -173,7 +195,15 @@ fn serialize(file: File) -> HashMap<String, ExpiringValue> {
     let mut db = HashMap::new();
     for _ in 0..hashtable_size {
         let (key, value, offset) = serialize_kv(&buf[pos..]).unwrap();
-        db.insert(key, value);
+        match value.expires_at {
+            Some(expires_at) if expires_at < now => {
+                println!("key: {}, expires_at: {:?}", key, expires_at);
+            }
+            _ => {
+                println!("key:{}, expires_at {:?}", key, value.expires_at);
+                db.insert(key, value);
+            }
+        }
         pos += offset;
     }
     db
